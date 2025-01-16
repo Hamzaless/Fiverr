@@ -56,6 +56,7 @@
    git lfs track "packed_minecraft.zip"
    git add .gitattributes packed_minecraft.zip
    ```
+   packet_minecraft.zip should contain the following folders: config, libraries, mods, versions
 
    **Step 3: Commit the Changes**  
    ```cmd

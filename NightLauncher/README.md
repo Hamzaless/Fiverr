@@ -29,7 +29,7 @@
 
 ---
 
-### **Step 10: Updating the Modpack**
+### **Step 2: Updating the Modpack**
 
 1. **Downloading and Installing Git**  
    - Download and install Git using this link:  

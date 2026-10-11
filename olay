@@ -1,5 +1,5 @@
 --[[
-    RAILhub — readable full-feature rewrite  (Your Bizarre Adventure)
+    Axion — readable full-feature script  (Your Bizarre Adventure)
     ---------------------------------------------------------------------------
     Every feature found in the obfuscated original, reimplemented readably and
     driven by our own UI. Game mechanics were reconstructed from the decompiled
@@ -44,9 +44,9 @@ function notify(text)
         return
     end
     pcall(function()
-        StarterGui:SetCore("SendNotification", { Title = "RAILhub", Text = tostring(text), Duration = 3 })
+        StarterGui:SetCore("SendNotification", { Title = "Axion", Text = tostring(text), Duration = 3 })
     end)
-    pcall(print, "[RAILhub] " .. tostring(text))
+    pcall(print, "[Axion] " .. tostring(text))
 end
 
 local function httpRequest(method, url, body)
@@ -99,7 +99,7 @@ local DEFAULTS = {
     SpeedChanger = false, SpeedValue = 16,
     JumpPowerChanger = false, JumpPower = 50,
     Fly = false, FlySpeed = 50, Noclip = false,
-    TravelMethod = "Tween", FarmPositionMode = "Auto",
+    TravelMethod = "Tween", TravelSpeed = 120, FarmPositionMode = "Auto",
 
     -- combat
     BlockBot = false, Reblocking = true, KeepBlockHoldF = false,
@@ -142,7 +142,7 @@ local DEFAULTS = {
     HideUsername = false,
 }
 
-local SETTINGS_FILE = "RAILhub_yba_settings.json"
+local SETTINGS_FILE = "Axion_yba_settings.json"
 local Config = {}
 for k, v in pairs(DEFAULTS) do Config[k] = v end
 
@@ -336,7 +336,7 @@ function zeroRootVelocity(r)
 end
 
 local moveTween, moveCancel = nil, false
-local MOVE_DEFAULT_SPEED = 425
+local MOVE_MIN_SPEED = 50
 
 function stopMoveTween()
     moveCancel = true
@@ -360,7 +360,7 @@ local function tweenRootTo(r, dest, speed, arrivedFn, state)
         disableNoclip(state)
         return true
     end
-    local spd = math.max(speed or MOVE_DEFAULT_SPEED, 50)
+    local spd = math.max(speed or Config.TravelSpeed or 120, MOVE_MIN_SPEED)
     local dur = math.min(3, math.max(0.05, dist / spd))
     local tween = TweenService:Create(r, TweenInfo.new(dur, Enum.EasingStyle.Linear), { CFrame = dest })
     moveTween = tween
@@ -485,18 +485,18 @@ end
 function Webhooks.send(embed)
     if not Webhooks.enabled() then return false end
     local payload = {
-        username = Config.DiscordUserID ~= "" and Config.DiscordUserID or "RAIL Hub",
+        username = Config.DiscordUserID ~= "" and Config.DiscordUserID or "Axion",
         embeds = { embed },
     }
     if Config.DiscordUserID ~= "" then
-        payload.embeds[1].footer = { text = "RAILhub " .. tostring(game.PlaceId) }
+        payload.embeds[1].footer = { text = "Axion " .. tostring(game.PlaceId) }
     end
     return pcall(function() httpRequest("POST", Config.WebhookURL, HttpService:JSONEncode(payload)) end)
 end
 
 function Webhooks.test()
     if not Webhooks.enabled() then notify("Please enter a valid Webhook URL first."); return end
-    Webhooks.send({ title = "[RAIL Hub] Webhook Connected",
+    Webhooks.send({ title = "[Axion] Webhook Connected",
                     description = "Connected successfully. Last update: 10.10.2026", color = 5763719 })
     notify("Webhook sent.")
 end
@@ -529,7 +529,7 @@ end
 
 function Webhooks.reconnectKick(reason)
     if not Config.NotifyKick then return end
-    Webhooks.send({ title = "[RAIL Hub] Reconnect / Kick", description = tostring(reason), color = 15158332 })
+    Webhooks.send({ title = "[Axion] Reconnect / Kick", description = tostring(reason), color = 15158332 })
 end
 
 --==========================================================================
@@ -541,7 +541,7 @@ Esp = { folders = {}, tracked = {}, hud = nil }
 local function espFolder(kind)
     if Esp.folders[kind] then return Esp.folders[kind] end
     local f = Instance.new("Folder")
-    f.Name = "RAILhub_" .. kind
+    f.Name = "Axion_" .. kind
     f.Parent = CoreGui
     Esp.folders[kind] = f
     return f
@@ -549,7 +549,7 @@ end
 
 local function newBillboard(kind, adornee, text, color)
     local bb = Instance.new("BillboardGui")
-    bb.Name = "RAILhubESP"
+    bb.Name = "AxionESP"
     bb.Adornee = adornee
     bb.Size = UDim2.new(0, 160, 0, 34)
     bb.StudsOffset = Vector3.new(0, 3, 0)
@@ -651,7 +651,7 @@ function Esp.hud()
         local h = humanoid()
         if not Esp.hud then
             local gui = Instance.new("ScreenGui")
-            gui.Name = "RAILhubHUD"
+            gui.Name = "AxionHUD"
             gui.ResetOnSpawn = false
             gui.Parent = CoreGui
             local label = Instance.new("TextLabel")
@@ -922,13 +922,18 @@ function attackM1()
 end
 
 -- teleport above the target and hit it (mirrors the original's stand-pilot farm)
+-- Attack remote is throttled: max one volley per 0.3s (spam = kick risk).
+Farm.lastM1 = 0
 function farmEnemy(enemyName)
     if not enemyName or enemyName == "" then return false end
     local model, hrp = findEnemy(enemyName)
     if not model then return false end
     moveCharacterTo(CFrame.new(hrp.Position + Vector3.new(0, 3.5, 0)))
     zeroRootVelocity(root())
-    attackM1()
+    if (now() - (Farm.lastM1 or 0)) >= 0.3 then
+        Farm.lastM1 = now()
+        attackM1()
+    end
     task.wait(0.05)
     return true
 end
@@ -985,7 +990,7 @@ end
 function runAutoPrestige()
     while Config.AutoPrestige do
         -- the original delegates this to its exported prestige helper; prefer it
-        local external = (getgenv and getgenv().RAILhub_ToggleAutoPrestige) or _G.toggleAutoPrestige
+        local external = (getgenv and (getgenv().Axion_ToggleAutoPrestige or getgenv().RAILhub_ToggleAutoPrestige)) or _G.toggleAutoPrestige
         if type(external) == "function" then
             pcall(external, true)
             break
@@ -1104,14 +1109,27 @@ function sellItem(name, silent, allMode)
         if not silent then notify("No " .. tostring(norm) .. " found.") end
         return false, "Item not found"
     end
-    local ok, err = sellItemWorker(tool, allMode and true or false)
-    if ok then
+    if _sellBusy then
+        sellTrace("busy, skipped " .. tostring(norm))
+        return false, "sale already in progress"
+    end
+    _sellBusy = true
+    -- pcall returns (true, workerResult, workerReason)
+    local wok, wres, werr = pcall(sellItemWorker, tool, allMode and true or false)
+    _sellBusy = false
+    if not wok then
+        sellTrace("worker crashed: " .. tostring(wres))
+        if not silent then notify("Sell crashed: " .. tostring(wres)) end
+        return false, tostring(wres)
+    end
+    if wres == true then
         Farm.stats.sold = Farm.stats.sold + 1
         task.wait(0.05)
         return true
     end
-    if not silent then notify("Failed to sell " .. tostring(norm) .. ".") end
-    return false, err
+    sellTrace("worker failed: " .. tostring(werr))
+    if not silent then notify("Failed to sell " .. tostring(norm) .. ": " .. tostring(werr)) end
+    return false, werr
 end
 
 function sellAll(name)
@@ -1161,18 +1179,22 @@ function checkAndSellMax()
     if not backpack then return end
     cleanupItemStick()
     local sold = {}
+    local firstFail = nil
     for _, item in ipairs(backpack:GetChildren()) do
         local limit = ITEM_LIMITS[item.Name] or 25
         if countItem(item.Name) >= limit
             and not isSellProtected(item.Name)
             and not isNeverAutoSell(item.Name) then
-            if sellItem(item.Name, true, true) then sold[item.Name] = countItem(item.Name) end
+            local ok, err = sellItem(item.Name, true, true)
+            if ok then sold[item.Name] = countItem(item.Name)
+            elseif not firstFail then firstFail = tostring(item.Name) .. ": " .. tostring(err) end
             task.wait(0.05)
         end
     end
     local parts = {}
     for name, qty in pairs(sold) do table.insert(parts, qty .. "x " .. name) end
     if #parts > 0 then notify("Auto sold: " .. table.concat(parts, ", ")) end
+    if firstFail then notify("Auto-sell failed: " .. firstFail) end
 end
 
 function checkAndBuyLuckyArrow()
@@ -1734,18 +1756,33 @@ end
 
 function serverHop()
     notify("Server Reconnect / Hop: searching for a new server...")
-    pcall(function()
-        local url = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?limit=100"
-        local body = HttpService:JSONDecode(httpRequest("GET", url))
+    -- the servers endpoint wants the UNIVERSE id, not the place id
+    -- (YBA: universe 1016936714 vs place 2809202155)
+    local universeId = game.GameId
+    if not universeId or universeId == 0 then universeId = game.PlaceId end
+    local ok, err = pcall(function()
+        local url = "https://games.roblox.com/v1/games/" .. tostring(universeId)
+            .. "/servers/Public?limit=100"
+        local res = httpRequest("GET", url)
+        -- executor request-libs return {Body,...}; GetAsync returns string
+        local bodyText = (type(res) == "table" and res.Body) or res
+        if type(bodyText) ~= "string" or bodyText == "" then
+            error("empty server list response")
+        end
+        local body = HttpService:JSONDecode(bodyText)
         local servers = body and body.data or {}
         for _, server in ipairs(servers) do
-            if server.id ~= game.JobId and server.playing < server.maxPlayers then
-                game:GetService("TeleportService"):TeleportToPlaceInstance(game.PlaceId, server.id, LocalPlayer)
+            if server.id ~= game.JobId
+                and (server.playing or 0) < (server.maxPlayers or 1) then
+                game:GetService("TeleportService"):TeleportToPlaceInstance(
+                    game.PlaceId, server.id, LocalPlayer)
+                notify("Hopping to a new server...")
                 return
             end
         end
         notify("No free server found, rejoining current.")
     end)
+    if not ok then notify("Server hop failed: " .. tostring(err)) end
 end
 
 --==========================================================================
@@ -1886,6 +1923,17 @@ local SELL_STEP_KEYWORDS = {
 local SELL_ALL_KEYWORDS = { "all" }
 local SELL_ONE_KEYWORDS = { "one" }
 
+-- Sell trace ring buffer: every attempt appends phase info so live failures
+-- can be diagnosed (read via getgenv().__axionSellLog on the executor).
+AxionSellLog = AxionSellLog or {}
+local function sellTrace(msg)
+    AxionSellLog[#AxionSellLog + 1] = (tick and tostring(math.floor(tick() * 10) / 10) or "?") .. " " .. msg
+    while #AxionSellLog > 30 do table.remove(AxionSellLog, 1) end
+    if getgenv then pcall(function() getgenv().__axionSellLog = AxionSellLog end) end
+end
+
+local _sellBusy = false
+
 -- The literal sell worker (proto#189). toolInstance must be a Tool.
 -- sellAll=true -> picks the "all" dialogue option, else "one".
 -- Returns true on success, (false, reason) otherwise.
@@ -1974,16 +2022,21 @@ function sellItemWorker(toolInstance, sellAll)
     merchant = merchant and merchant:FindFirstChild("Merchant")
     if merchant then
         remote:FireServer("PromptTriggered", merchant)
+        sellTrace("merchant remote fired")
     else
         local dialogues = workspace:FindFirstChild("Dialogues")
         local npc = dialogues and dialogues:FindFirstChild("ShiftPlox, The Travelling Merchant")
         local prompt = npc and npc:FindFirstChildWhichIsA("ProximityPrompt", true)
         if prompt and type(fireproximityprompt) == "function" then
             pcall(function() fireproximityprompt(prompt) end)
+            sellTrace("merchant prompt fired")
+        else
+            sellTrace("NO merchant trigger (no remote, no prompt)")
         end
     end
 
     local mode = sellAll and "all" or "one"
+    sellTrace("worker start: " .. tostring(tool and tool.Name) .. " mode=" .. mode)
     local attempt = 1
     local deadline = os.clock() + 8
     while os.clock() < deadline and attempt <= 3 do
@@ -1991,20 +2044,32 @@ function sellItemWorker(toolInstance, sellAll)
         if frame and frame.Visible then
             local options = frame:FindFirstChild("Options")
             if options and options.Visible then
-                local keywords
-                if attempt == 1 then keywords = SELL_STEP_KEYWORDS[1]
-                elseif attempt == 2 then keywords = SELL_STEP_KEYWORDS[2]
-                else
-                    keywords = (mode == "all") and SELL_ALL_KEYWORDS or SELL_ONE_KEYWORDS
-                end
-                local picked = nil
+                -- stage matching with fall-through: an option matching a LATER
+                -- stage jumps straight there (dialogues vary; strict order deadlocks).
+                local qtyKw = (mode == "all") and SELL_ALL_KEYWORDS or SELL_ONE_KEYWORDS
+                local picked, pickedStage = nil, 4
                 for _, child in ipairs(options:GetChildren()) do
                     local btn = child:FindFirstChild("TextButton", true) or child
                     local text = scrapeText(child)
-                    for _, kw in ipairs(keywords) do
-                        if text:find(kw, 1, true) then picked = btn break end
+                    local stage = 0
+                    for _, kw in ipairs(qtyKw) do
+                        if text:find(kw, 1, true) then stage = 3 break end
                     end
-                    if picked then break end
+                    if stage == 0 then
+                        for _, kw in ipairs(SELL_STEP_KEYWORDS[2]) do
+                            if text:find(kw, 1, true) then stage = 2 break end
+                        end
+                    end
+                    if stage == 0 and attempt <= 1 then
+                        for _, kw in ipairs(SELL_STEP_KEYWORDS[1]) do
+                            if text:find(kw, 1, true) then stage = 1 break end
+                        end
+                    end
+                    -- earliest needed stage first (don't skip the sell click
+                    -- when it is still on screen), but accept later stages.
+                    if stage >= attempt and stage < pickedStage then
+                        picked, pickedStage = btn, stage
+                    end
                 end
                 if attempt == 3 and not picked and sellAll then
                     local opt6 = options:FindFirstChild("Option6")
@@ -2012,13 +2077,14 @@ function sellItemWorker(toolInstance, sellAll)
                     if btn6 then
                         local text6 = scrapeText(opt6)
                         if text6:find("all", 1, true) then
-                            picked = btn6
+                            picked, pickedStage = btn6, 3
                         end
                     end
                 end
                 if picked then
                     clickObject(picked)
-                    attempt = attempt + 1
+                    sellTrace("clicked stage " .. pickedStage .. " (attempt was " .. attempt .. ")")
+                    attempt = pickedStage + 1
                     task.wait(0.06)
                 end
             end
@@ -2053,8 +2119,16 @@ function sellItemWorker(toolInstance, sellAll)
     local bp = player:FindFirstChild("Backpack")
     local stillHeld = tool and tool.Parent
         and (tool.Parent == char or tool.Parent == (bp or {}))
-    if (not stillHeld) or attempt >= 4 then return true end
-    return false
+    if not stillHeld then
+        sellTrace("sold: tool gone")
+        return true
+    end
+    if attempt >= 4 then
+        sellTrace("done: all clicks through, tool still held")
+        return true
+    end
+    sellTrace("FAILED: attempt=" .. attempt .. " tool still held")
+    return false, "dialogue did not complete (attempt " .. attempt .. "/3)"
 end
 -- Per-stand hover heights for the NPC worker (u5 in the original). Values are
 -- reconstructed: only the constant 27 appears literally in the dump; everything
@@ -2213,9 +2287,10 @@ function farmNpcWorker(targetName)
     else
         destCF = targetCF * CFrame.new(0, -hover, 0) * CFrame.Angles(math.rad(90), 0, 0)
     end
-    hrp.CFrame = destCF
-    hrp.AssemblyLinearVelocity = Vector3.zero
-    hrp.AssemblyAngularVelocity = Vector3.zero
+    -- initial engage travels (tweened, noclip) instead of teleporting across
+    -- the map: instant long-range sets are the easiest kick trigger.
+    moveCharacterTo(destCF)
+    zeroRootVelocity(root())
 
     local heartbeatConn
     heartbeatConn = RunService.Heartbeat:Connect(function()
@@ -2231,6 +2306,9 @@ function farmNpcWorker(targetName)
             cam.Parent = c
         end
         cam.Value = tgtPart
+        -- cruise corrections are small sets only; far drift is re-chased by
+        -- the main loop through the tween engine (big instant sets = kick).
+        if (tgtPart.Position - myHRP.Position).Magnitude > 25 then return end
         local sp = pilotFlag and standMorphPart(c) or nil
         if sp then
             setAlignMoversEnabled(false)
@@ -2331,19 +2409,35 @@ function farmNpcWorker(targetName)
             fireRemote("InputBegan", { Input = Enum.KeyCode.R })
             invokeRemote("Attack", "m2")
         else
-            if tick() - lastMove > 0.12 and standName ~= "None" then
-                lastMove = tick()
-                local moves = STAND_SKILLS[standName]
-                if moves then
-                    for _, skill in ipairs(moves) do
-                        invokeRemote("SpecialMove", { Skill = skill })
-                    end
-                else
-                    invokeRemote("SpecialMove", { Skill = "Stand Barrage" })
-                    invokeRemote("SpecialMove", { Skill = "Stand Barrage Finisher" })
+            -- re-chase through the tween engine when the target drifted off
+            local rechased = false
+            do
+                local tp = resolvePart(target)
+                local mr = root()
+                if tp and mr and (tp.Position - mr.Position).Magnitude > 60 then
+                    moveCharacterTo(tp)
+                    rechased = true
                 end
             end
-            for _ = 1, 5 do invokeRemote("Attack", "m1") end
+            if not rechased then
+                -- throttled: moves at most ~3/s, volleys spaced 0.3s (spam = kick)
+                if tick() - lastMove > 0.35 and standName ~= "None" then
+                    lastMove = tick()
+                    local moves = STAND_SKILLS[standName]
+                    if moves then
+                        for _, skill in ipairs(moves) do
+                            invokeRemote("SpecialMove", { Skill = skill })
+                        end
+                    else
+                        invokeRemote("SpecialMove", { Skill = "Stand Barrage" })
+                        invokeRemote("SpecialMove", { Skill = "Stand Barrage Finisher" })
+                    end
+                end
+                if tick() - (farmNpcLastVolley or 0) > 0.3 then
+                    farmNpcLastVolley = tick()
+                    for _ = 1, 3 do invokeRemote("Attack", "m1") end
+                end
+            end
         end
         local spec = stats and stats:FindFirstChild("Spec")
         spec = spec and spec.Value
@@ -2379,115 +2473,126 @@ function farmNpcWorker(targetName)
 end
 
 --==========================================================================
--- AXION interface (Fluent UI library, animated + acrylic)
+-- AXION interface (LinoriaLib: lightweight, fast-loading, organized).
 -- Loaded pcall-guarded so headless/stub runs keep working without it.
+-- API verified against the official Example.lua (CreateWindow/AddTab/
+-- AddLeftGroupbox/AddToggle/AddSlider/AddDropdown/AddButton/AddInput/
+-- AddLabel/AddDivider + SaveManager/ThemeManager wiring).
 --==========================================================================
 
-local FluentUI = nil
+local LinoriaUI = nil
 do
     local ok, lib = pcall(function()
-        return loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
+        return loadstring(game:HttpGet("https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/Library.lua"))()
     end)
-    if ok and lib then FluentUI = lib end
+    if ok and lib then LinoriaUI = lib end
 end
 
+-- TODO(owner): put the real Axion Discord invite here.
+local DISCORD_INVITE = "https://discord.gg/REPLACE_ME"
+
 local function buildAxionUI()
-    if not FluentUI then return end
-    local Fluent = FluentUI
-    local SaveManager, InterfaceManager = nil, nil
+    if not LinoriaUI then return end
+    local Library = LinoriaUI
+    local ThemeManager, SaveManager = nil, nil
     pcall(function()
-        SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
-        InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
+        ThemeManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/addons/ThemeManager.lua"))()
+        SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/addons/SaveManager.lua"))()
     end)
 
-    local Window = Fluent:CreateWindow({
-        Title = "Axion",
-        SubTitle = "YBA Hub",
-        TabWidth = 160,
-        Size = UDim2.fromOffset(600, 470),
-        Acrylic = true,
-        Theme = "Dark",
-        MinimizeKey = Enum.KeyCode.LeftControl,
+    local Window = Library:CreateWindow({
+        Title = "Axion | YBA",
+        Center = true,
+        AutoShow = true,
+        TabPadding = 8,
+        MenuFadeTime = 0.15,
     })
 
     local sellOptions = { "(none)" }
     for _, n in ipairs(ITEM_NAMES) do table.insert(sellOptions, n) end
 
     local Tabs = {
-        Info = Window:AddTab({ Title = "Information", Icon = "info" }),
-        Farming = Window:AddTab({ Title = "Farming", Icon = "sprout" }),
-        Stands = Window:AddTab({ Title = "Stands", Icon = "sparkles" }),
-        Sell = Window:AddTab({ Title = "Sell items", Icon = "coins" }),
-        Visuals = Window:AddTab({ Title = "Visuals", Icon = "eye" }),
-        PlayerESP = Window:AddTab({ Title = "Player ESP", Icon = "users" }),
-        PvP = Window:AddTab({ Title = "PvP", Icon = "swords" }),
-        Movement = Window:AddTab({ Title = "Movement", Icon = "wind" }),
-        Server = Window:AddTab({ Title = "Server", Icon = "server" }),
-        Webhooks = Window:AddTab({ Title = "Webhooks", Icon = "webhook" }),
-        Settings = Window:AddTab({ Title = "Settings", Icon = "settings" }),
+        Farming = Window:AddTab("Farming"),
+        Sell = Window:AddTab("Sell & Shop"),
+        Stands = Window:AddTab("Stands"),
+        Visuals = Window:AddTab("Visuals"),
+        Movement = Window:AddTab("Movement"),
+        Server = Window:AddTab("Server"),
+        Webhooks = Window:AddTab("Webhooks"),
+        Settings = Window:AddTab("Settings"),
+        Info = Window:AddTab("Info"),
     }
-    local T = Tabs
 
-    -- Information
-    T.Info:AddParagraph({ Title = "Axion — Version 1.0", Content = "YBA script hub.\nLast update: 11.10.2026" })
-    T.Info:AddButton({ Title = "Discord Link", Description = "Copy invite to clipboard",
-        Callback = function() notify("https://discord.gg/67UTqK8su5") end })
-    T.Info:AddToggle("ShowUserInfo", { Title = "User Info", Default = Config.ShowUserInfo,
-        Callback = function(v) Config.ShowUserInfo = v end })
-    T.Info:AddToggle("ShowPing", { Title = "Show Ping", Default = Config.Ping,
-        Callback = function(v) Config.Ping = v startPing() end })
-    T.Info:AddToggle("AutoExecute", { Title = "Auto Execute", Default = Config.AutoExecute,
-        Callback = function(v) Config.AutoExecute = v autoExecute() end })
-
-    -- Farming
-    T.Farming:AddToggle("AutoFarmItems", { Title = "Auto farm items", Default = Config.AutoFarmItems,
+    -- ================= Farming =================
+    local farmItems = Tabs.Farming:AddLeftGroupbox("Items")
+    farmItems:AddToggle("AutoFarmItems", { Text = "Auto farm items", Default = Config.AutoFarmItems,
         Callback = function(v) Config.AutoFarmItems = v
             if v then Farm.startAuto() else Farm.stopAuto() end end })
-    T.Farming:AddButton({ Title = "Enable Farm", Description = "Start item farming now",
-        Callback = function() Farm.startAuto() end })
-    T.Farming:AddDropdown("FarmMethod", { Title = "Farm Method",
-        Values = { "Auto", "Roam", "Static", "Server Hop" }, Multi = false, Default = 1,
+    farmItems:AddDropdown("FarmMethod", { Text = "Farm method",
+        Values = { "Auto", "Roam", "Static", "Server Hop" }, Default = 1,
         Callback = function(v) Config.FarmMethod = v end })
-    T.Farming:AddToggle("NpcFarm", { Title = "Farm Target NPC", Default = Config.NpcFarm,
-        Callback = function(v) Config.NpcFarm = v
-            if v then Config.QuestFarm = false task.spawn(directNpcFarm, Config.FarmTargetNPC) end end })
-    T.Farming:AddDropdown("FarmTargetNPC", { Title = "Farm Target NPC", Values = NPCS,
-        Multi = false, Default = 1, Callback = function(v) Config.FarmTargetNPC = v end })
-    T.Farming:AddToggle("QuestFarm", { Title = "Quest & NPC Farm", Default = Config.QuestFarm,
-        Callback = function(v) Config.QuestFarm = v
-            if v then Config.NpcFarm = false task.spawn(runQuestFarm) end end })
-    T.Farming:AddDropdown("Quest", { Title = "Select Quest", Values = QUESTS,
-        Multi = false, Default = 1, Callback = function(v) Config.Quest = v end })
-    T.Farming:AddToggle("NpcFarmOriginal", { Title = "Original NPC worker", Default = Config.NpcFarmOriginal,
-        Description = "Literal proto#576 engine: pilot, quest-progress, 25s loop",
-        Callback = function(v) Config.NpcFarmOriginal = v
-            if v then task.spawn(function() farmNpcWorker(Config.FarmTargetNPC) end) end end })
-    T.Farming:AddToggle("AutoPrestige", { Title = "Auto Prestige", Default = Config.AutoPrestige,
-        Callback = function(v) Config.AutoPrestige = v
-            if v then task.spawn(runAutoPrestige) end end })
-    T.Farming:AddToggle("StealDroppedMoney", { Title = "Steal Dropped Money",
-        Default = Config.StealDroppedMoney,
-        Callback = function(v) Config.StealDroppedMoney = v end })
-    T.Farming:AddToggle("ServerHopFarm", { Title = "Server Hop Farm", Default = Config.ServerHopFarm,
-        Callback = function(v) Config.ServerHopFarm = v if v then serverHop() end end })
-    T.Farming:AddInput("FarmItems", { Title = "Items (empty = all)", Default = "",
+    farmItems:AddInput("FarmItems", { Text = "Items (empty = all)", Default = "",
         Placeholder = "Lucky Arrow, Diamond", Finished = true,
         Callback = function(v) Config.FarmItems = {}
             for part in string.gmatch(v, "[^,]+") do
                 table.insert(Config.FarmItems, string.gsub(part, "^%s*(.-)%s*$", "%1")) end end })
+    farmItems:AddToggle("ServerHopFarm", { Text = "Server hop when map empty",
+        Default = Config.ServerHopFarm,
+        Callback = function(v) Config.ServerHopFarm = v if v then serverHop() end end })
 
-    -- Stands
-    T.Stands:AddToggle("StandFarm", { Title = "Stand Farm", Default = Config.StandFarm,
+    local farmNPC = Tabs.Farming:AddRightGroupbox("NPC & Quest")
+    farmNPC:AddToggle("NpcFarm", { Text = "Farm target NPC", Default = Config.NpcFarm,
+        Callback = function(v) Config.NpcFarm = v
+            if v then Config.QuestFarm = false task.spawn(directNpcFarm, Config.FarmTargetNPC) end end })
+    farmNPC:AddDropdown("FarmTargetNPC", { Text = "Target NPC", Values = NPCS, Default = 1,
+        Callback = function(v) Config.FarmTargetNPC = v end })
+    farmNPC:AddToggle("QuestFarm", { Text = "Quest farm", Default = Config.QuestFarm,
+        Callback = function(v) Config.QuestFarm = v
+            if v then Config.NpcFarm = false task.spawn(runQuestFarm) end end })
+    farmNPC:AddDropdown("Quest", { Text = "Quest", Values = QUESTS, Default = 1,
+        Callback = function(v) Config.Quest = v end })
+    farmNPC:AddToggle("NpcFarmOriginal", { Text = "Original NPC engine", Default = Config.NpcFarmOriginal,
+        Tooltip = "Literal quest worker: pilot, quest progress, 25s loop",
+        Callback = function(v) Config.NpcFarmOriginal = v
+            if v then task.spawn(function() farmNpcWorker(Config.FarmTargetNPC) end) end end })
+    farmNPC:AddToggle("AutoPrestige", { Text = "Auto prestige", Default = Config.AutoPrestige,
+        Callback = function(v) Config.AutoPrestige = v
+            if v then task.spawn(runAutoPrestige) end end })
+    farmNPC:AddToggle("StealDroppedMoney", { Text = "Steal dropped money",
+        Default = Config.StealDroppedMoney,
+        Callback = function(v) Config.StealDroppedMoney = v end })
+
+    -- ================= Sell & Shop =================
+    local sellGrp = Tabs.Sell:AddLeftGroupbox("Sell")
+    sellGrp:AddDropdown("SellSpecific", { Text = "Sell specific item", Values = sellOptions, Default = 1,
+        Callback = function(v) Config.SellSpecific = v
+            if v ~= "(none)" then sellAll(v) end end })
+    sellGrp:AddDropdown("SellSelected", { Text = "Sell selected item", Values = sellOptions, Default = 1,
+        Callback = function(v) Config.SellSelected = v
+            if v ~= "(none)" then sellAll(v) end end })
+    sellGrp:AddButton({ Text = "Sell all items",
+        Func = function() sellAllSelected(ITEM_NAMES) end })
+    sellGrp:AddButton({ Text = "Sell worthless items", Func = function() sellAllWorthless() end })
+    sellGrp:AddToggle("AutoSellOnMax", { Text = "Auto sell on stack limit",
+        Default = Config.AutoSellOnMax, Callback = function(v) Config.AutoSellOnMax = v end })
+
+    local shopGrp = Tabs.Sell:AddRightGroupbox("Shop & Filters")
+    shopGrp:AddToggle("AutoBuyArrow", { Text = "Auto buy Lucky Arrow (75k)",
+        Default = Config.AutoBuyArrow, Callback = function(v) Config.AutoBuyArrow = v end })
+    shopGrp:AddInput("NeverAutoSell", { Text = "Never auto-sell (empty = sell all)",
+        Default = "", Finished = true,
+        Callback = function(v) Config.NeverAutoSell = v end })
+
+    -- ================= Stands =================
+    local standGrp = Tabs.Stands:AddLeftGroupbox("Stand farm")
+    standGrp:AddToggle("StandFarm", { Text = "Stand farm", Default = Config.StandFarm,
         Callback = function(v) Config.StandFarm = v
             if v then StandFarm.start() else StandFarm.stop() end end })
-    T.Stands:AddButton({ Title = "Farm stands", Callback = function() StandFarm.start() end })
-    T.Stands:AddToggle("KeepAnyShiny", { Title = "Keep only Shiny", Default = Config.KeepAnyShiny,
+    standGrp:AddToggle("KeepAnyShiny", { Text = "Keep only shiny", Default = Config.KeepAnyShiny,
         Callback = function(v) Config.KeepAnyShiny = v end })
-    T.Stands:AddButton({ Title = "Skip current Shiny", Callback = function() StandFarm.skipShiny() end })
-    T.Stands:AddDropdown("PilotStand", { Title = "Pilot Stand", Values = STANDS,
-        Multi = false, Default = 1, Callback = function(v) Config.PilotStand = v end })
-    T.Stands:AddDropdown("KeepStands", { Title = "Select Stands to Keep", Values = STANDS,
-        Multi = true, Default = {},
+    standGrp:AddButton({ Text = "Skip current shiny", Func = function() StandFarm.skipShiny() end })
+    standGrp:AddDropdown("KeepStands", { Text = "Stands to keep", Values = STANDS,
+        Default = 1, Multi = true,
         Callback = function(v)
             local list = {}
             if type(v) == "table" then
@@ -2498,211 +2603,150 @@ local function buildAxionUI()
             Config.KeepStands = list
         end })
 
-    -- Sell
-    T.Sell:AddDropdown("SellSpecific", { Title = "Sell specific item", Values = sellOptions,
-        Multi = false, Default = 1,
-        Callback = function(v) Config.SellSpecific = v
-            if v ~= "(none)" then sellAll(v) end end })
-    T.Sell:AddDropdown("SellSelected", { Title = "Sell selected item", Values = sellOptions,
-        Multi = false, Default = 1,
-        Callback = function(v) Config.SellSelected = v
-            if v ~= "(none)" then sellAll(v) end end })
-    T.Sell:AddButton({ Title = "Sell All Items", Callback = function() sellAllSelected(ITEM_NAMES) end })
-    T.Sell:AddButton({ Title = "Sell worthless items", Callback = function() sellAllWorthless() end })
-    T.Sell:AddToggle("AutoSellOnMax", { Title = "Auto sell on stack limit",
-        Default = Config.AutoSellOnMax, Callback = function(v) Config.AutoSellOnMax = v end })
-    T.Sell:AddInput("NeverAutoSell", { Title = "Never auto-sell (empty = sell all)",
-        Default = "", Placeholder = "item name", Finished = true,
-        Callback = function(v) Config.NeverAutoSell = v end })
-    T.Sell:AddToggle("AutoBuyArrow", { Title = "Auto buy Lucky Arrow (75k)",
-        Default = Config.AutoBuyArrow, Callback = function(v) Config.AutoBuyArrow = v end })
-
-    -- Visuals
-    T.Visuals:AddToggle("ItemESP", { Title = "Item ESP", Default = Config.ItemESP,
+    -- ================= Visuals =================
+    local visItem = Tabs.Visuals:AddLeftGroupbox("Item ESP & World")
+    visItem:AddToggle("ItemESP", { Text = "Item ESP", Default = Config.ItemESP,
         Callback = function(v) Config.ItemESP = v end })
-    T.Visuals:AddSlider("ItemESPTextSize", { Title = "Item ESP Text Size", Default = 14,
+    visItem:AddSlider("ItemESPTextSize", { Text = "ESP text size", Default = 14,
         Min = 8, Max = 24, Rounding = 0, Callback = function(v) Config.ItemESPTextSize = v end })
-    T.Visuals:AddToggle("ESPChams", { Title = "ESP Chams", Default = Config.ESPChams,
-        Callback = function(v) Config.ESPChams = v end })
-    T.Visuals:AddToggle("ESPNames", { Title = "ESP Names", Default = Config.ESPNames,
+    visItem:AddToggle("ESPNames", { Text = "Names", Default = Config.ESPNames,
         Callback = function(v) Config.ESPNames = v end })
-    T.Visuals:AddToggle("ESPStand", { Title = "ESP Stand", Default = Config.ESPStand,
-        Callback = function(v) Config.ESPStand = v end })
-    T.Visuals:AddToggle("ESPHealth", { Title = "ESP Health", Default = Config.ESPHealth,
-        Callback = function(v) Config.ESPHealth = v end })
-    T.Visuals:AddSlider("ESPDistance", { Title = "ESP Distance", Default = 1000,
-        Min = 50, Max = 3000, Rounding = 0, Callback = function(v) Config.ESPDistance = v end })
-    T.Visuals:AddToggle("HUDHealth", { Title = "View Self HP", Default = Config.HUDHealth,
-        Callback = function(v) Config.HUDHealth = v end })
-    T.Visuals:AddToggle("WeatherChanger", { Title = "Enable Weather Changer",
-        Default = Config.WeatherChanger,
+    visItem:AddToggle("WeatherChanger", { Text = "Weather changer", Default = Config.WeatherChanger,
         Callback = function(v) Config.WeatherChanger = v applyWeather() end })
-    T.Visuals:AddDropdown("Weather", { Title = "Select Weather", Values = WEATHERS,
-        Multi = false, Default = 1,
+    visItem:AddDropdown("Weather", { Text = "Weather", Values = WEATHERS, Default = 1,
         Callback = function(v) Config.Weather = v applyWeather() end })
-    T.Visuals:AddToggle("RemoveMap", { Title = "Remove Map", Default = Config.RemoveMap,
+    visItem:AddToggle("RemoveMap", { Text = "Remove map", Default = Config.RemoveMap,
         Callback = function(v) Config.RemoveMap = v removeMap() end })
 
-    -- Player ESP
-    T.PlayerESP:AddToggle("PlayerESP", { Title = "Enable Player ESP", Default = Config.PlayerESP,
+    local visPlayer = Tabs.Visuals:AddRightGroupbox("Player ESP")
+    visPlayer:AddToggle("PlayerESP", { Text = "Player ESP", Default = Config.PlayerESP,
         Callback = function(v) Config.PlayerESP = v end })
-    T.PlayerESP:AddToggle("StaffESP", { Title = "Staff ESP", Default = Config.StaffESP,
+    visPlayer:AddToggle("StaffESP", { Text = "Staff ESP", Default = Config.StaffESP,
         Callback = function(v) Config.StaffESP = v end })
-    T.PlayerESP:AddToggle("StaffDetector", { Title = "Staff Detector", Default = Config.StaffDetector,
+    visPlayer:AddToggle("StaffDetector", { Text = "Staff detector", Default = Config.StaffDetector,
         Callback = function(v) Config.StaffDetector = v end })
-    T.PlayerESP:AddButton({ Title = "Re-hook Players", Callback = function() rehookPlayers() end })
-    T.PlayerESP:AddButton({ Title = "Refresh Player List", Callback = function() refreshPlayerList() end })
+    visPlayer:AddToggle("ESPChams", { Text = "Chams", Default = Config.ESPChams,
+        Callback = function(v) Config.ESPChams = v end })
+    visPlayer:AddToggle("ESPStand", { Text = "Show stands", Default = Config.ESPStand,
+        Callback = function(v) Config.ESPStand = v end })
+    visPlayer:AddToggle("ESPHealth", { Text = "Show health", Default = Config.ESPHealth,
+        Callback = function(v) Config.ESPHealth = v end })
+    visPlayer:AddSlider("ESPDistance", { Text = "Max distance", Default = 1000,
+        Min = 50, Max = 3000, Rounding = 0, Callback = function(v) Config.ESPDistance = v end })
+    visPlayer:AddToggle("HUDHealth", { Text = "Self HP HUD", Default = Config.HUDHealth,
+        Callback = function(v) Config.HUDHealth = v end })
+    visPlayer:AddButton({ Text = "Refresh player list", Func = function() refreshPlayerList() end })
+    visPlayer:AddButton({ Text = "Re-hook players", Func = function() rehookPlayers() end })
 
-    -- PvP
-    T.PvP:AddToggle("BlockBot", { Title = "Enable BlockBot", Default = Config.BlockBot,
-        Callback = function(v) Config.BlockBot = v end })
-    T.PvP:AddToggle("Reblocking", { Title = "Allow re-blocking", Default = Config.Reblocking,
-        Callback = function(v) Config.Reblocking = v end })
-    T.PvP:AddToggle("KeepBlockHoldF", { Title = "Keep block while holding F",
-        Default = Config.KeepBlockHoldF, Callback = function(v) Config.KeepBlockHoldF = v end })
-    T.PvP:AddToggle("Unblocking", { Title = "Unblocking", Default = Config.Unblocking,
-        Callback = function(v) Config.Unblocking = v end })
-    T.PvP:AddToggle("ProjectilesPriority", { Title = "Projectiles priority",
-        Default = Config.ProjectilesPriority, Callback = function(v) Config.ProjectilesPriority = v end })
-    T.PvP:AddToggle("Coliseum", { Title = "Coliseum (1v1/2v2) mode", Default = Config.Coliseum,
-        Callback = function(v) Config.Coliseum = v end })
-    T.PvP:AddToggle("BlockBeachBoyEY", { Title = "Block Beach Boy E and Y",
-        Default = Config.BlockBeachBoyEY, Callback = function(v) Config.BlockBeachBoyEY = v end })
-    T.PvP:AddToggle("StickyFingers", { Title = "sticky finger exploit",
-        Default = Config.StickyFingers, Callback = function(v) Config.StickyFingers = v end })
-    T.PvP:AddToggle("StandPilot", { Title = "Stand Pilot", Default = Config.StandPilot,
-        Callback = function(v) Config.StandPilot = v
-            if v then Pilot.start() else Pilot.stop() end end })
-    T.PvP:AddToggle("MovementPrediction", { Title = "Movement Prediction",
-        Default = Config.MovementPrediction, Callback = function(v) Config.MovementPrediction = v end })
-    T.PvP:AddSlider("PredictionStrength", { Title = "Prediction Strength",
-        Default = 15, Min = 0, Max = 100, Rounding = 0,
-        Callback = function(v) Config.PredictionStrength = v / 100 end })
-    T.PvP:AddToggle("ForceCleanupPilot", { Title = "Force Cleanup Pilot",
-        Default = Config.ForceCleanupPilot,
-        Callback = function(v) Config.ForceCleanupPilot = v
-            if v then Pilot.forceCleanup() end end })
-    T.PvP:AddSlider("PilotSpeed", { Title = "Pilot Speed", Default = 20,
-        Min = 8, Max = 200, Rounding = 0, Callback = function(v) Config.PilotSpeed = v end })
-    T.PvP:AddToggle("InfPilotRange", { Title = "Inf Pilot Range", Default = Config.InfPilotRange,
-        Callback = function(v) Config.InfPilotRange = v end })
-    T.PvP:AddToggle("SpectateStand", { Title = "Spectate Stand", Default = Config.SpectateStand,
-        Callback = function(v) Config.SpectateStand = v end })
-    T.PvP:AddInput("TargetStandPlayer", { Title = "Target Stand Player", Default = "",
-        Placeholder = "player name", Finished = true,
-        Callback = function(v) Config.TargetStandPlayer = v end })
-    T.PvP:AddInput("TargetPlayer", { Title = "Target Player", Default = "",
-        Placeholder = "player name", Finished = true,
-        Callback = function(v) Config.TargetPlayer = v end })
-    T.PvP:AddToggle("TargetAll", { Title = "target (empty = all)", Default = Config.TargetAll,
-        Callback = function(v) Config.TargetAll = v end })
-    T.PvP:AddButton({ Title = "Reset Player", Callback = function() resetPlayer() end })
-    T.PvP:AddToggle("FinisherChanger", { Title = "Enable Finisher changer",
-        Default = Config.FinisherChanger, Callback = function(v) Config.FinisherChanger = v end })
-    T.PvP:AddDropdown("Finisher", { Title = "Select Finisher", Values = FINISHERS,
-        Multi = false, Default = 1,
-        Callback = function(v) Config.Finisher = v
-            if Config.FinisherChanger then useFinisher(v) end end })
-
-    -- Movement
-    T.Movement:AddToggle("SpeedChanger", { Title = "Speed Changer", Default = Config.SpeedChanger,
+    -- ================= Movement =================
+    local moveGrp = Tabs.Movement:AddLeftGroupbox("Speed")
+    moveGrp:AddToggle("SpeedChanger", { Text = "Speed changer", Default = Config.SpeedChanger,
         Callback = function(v) Config.SpeedChanger = v applySpeed() end })
-    T.Movement:AddSlider("SpeedValue", { Title = "Speed", Default = 16,
+    moveGrp:AddSlider("SpeedValue", { Text = "Speed", Default = 16,
         Min = 16, Max = 300, Rounding = 0,
         Callback = function(v) Config.SpeedValue = v applySpeed() end })
-    T.Movement:AddToggle("JumpPowerChanger", { Title = "JumpPower Changer",
-        Default = Config.JumpPowerChanger,
+    moveGrp:AddToggle("JumpPowerChanger", { Text = "Jump changer", Default = Config.JumpPowerChanger,
         Callback = function(v) Config.JumpPowerChanger = v applyJump() end })
-    T.Movement:AddSlider("JumpPower", { Title = "JumpPower", Default = 50,
+    moveGrp:AddSlider("JumpPower", { Text = "Jump power", Default = 50,
         Min = 50, Max = 500, Rounding = 0,
         Callback = function(v) Config.JumpPower = v applyJump() end })
-    T.Movement:AddToggle("Fly", { Title = "Fly", Default = Config.Fly,
-        Callback = function(v) Config.Fly = v setFly(v) end })
-    T.Movement:AddSlider("FlySpeed", { Title = "Fly Speed", Default = 50,
-        Min = 10, Max = 300, Rounding = 0, Callback = function(v) Config.FlySpeed = v end })
-    T.Movement:AddToggle("Noclip", { Title = "Noclip", Default = Config.Noclip,
-        Callback = function(v) Config.Noclip = v setNoclip(v) end })
-    T.Movement:AddDropdown("TravelMethod", { Title = "Travel Method",
-        Values = { "Tween", "Teleport" }, Multi = false, Default = 1,
-        Callback = function(v) Config.TravelMethod = v end })
-    T.Movement:AddDropdown("FarmPositionMode", { Title = "Farm Position Mode",
-        Values = { "Auto", "Static" }, Multi = false, Default = 1,
-        Callback = function(v) Config.FarmPositionMode = v end })
 
-    -- Server
-    T.Server:AddToggle("StaffAutoRejoin", { Title = "Staff Detector (Auto Rejoin)",
-        Default = Config.StaffAutoRejoin, Callback = function(v) Config.StaffAutoRejoin = v end })
-    T.Server:AddToggle("AutoRejoinKick", { Title = "Auto Rejoin (Kick/Error)",
-        Default = Config.AutoRejoinKick, Callback = function(v) Config.AutoRejoinKick = v end })
-    T.Server:AddToggle("ServerHop", { Title = "Server Reconnect / Hop",
-        Default = Config.ServerHop,
+    local travelGrp = Tabs.Movement:AddRightGroupbox("Travel")
+    travelGrp:AddToggle("Fly", { Text = "Fly", Default = Config.Fly,
+        Callback = function(v) Config.Fly = v setFly(v) end })
+    travelGrp:AddSlider("FlySpeed", { Text = "Fly speed", Default = 50,
+        Min = 10, Max = 300, Rounding = 0, Callback = function(v) Config.FlySpeed = v end })
+    travelGrp:AddToggle("Noclip", { Text = "Noclip", Default = Config.Noclip,
+        Callback = function(v) Config.Noclip = v setNoclip(v) end })
+    travelGrp:AddDropdown("TravelMethod", { Text = "Travel method",
+        Values = { "Tween", "Teleport" }, Default = 1,
+        Callback = function(v) Config.TravelMethod = v end })
+    travelGrp:AddSlider("TravelSpeed", { Text = "Travel speed (anti-kick: keep low)",
+        Default = 120, Min = 16, Max = 425, Rounding = 0,
+        Callback = function(v) Config.TravelSpeed = v end })
+    travelGrp:AddDropdown("FarmPositionMode", { Text = "Farm position",
+        Values = { "Auto", "Static" }, Default = 1,
+        Callback = function(v) Config.FarmPositionMode = v end })
+    travelGrp:AddButton({ Text = "Reset character", Func = function() resetPlayer() end })
+
+    -- ================= Server =================
+    local srvGrp = Tabs.Server:AddLeftGroupbox("Hop & Rejoin")
+    srvGrp:AddToggle("ServerHop", { Text = "Server hop now", Default = Config.ServerHop,
         Callback = function(v) Config.ServerHop = v if v then serverHop() end end })
-    T.Server:AddButton({ Title = "Server Hop", Callback = function() serverHop() end })
-    T.Server:AddButton({ Title = "Reconnect", Callback = function() reconnect("manual") end })
-    T.Server:AddButton({ Title = "Rejoin", Callback = function() rejoin() end })
-    T.Server:AddToggle("AutoReconnect", { Title = "Auto Reconnect", Default = Config.AutoReconnect,
+    srvGrp:AddButton({ Text = "Server hop", Func = function() serverHop() end })
+    srvGrp:AddButton({ Text = "Reconnect", Func = function() reconnect("manual") end })
+    srvGrp:AddButton({ Text = "Rejoin", Func = function() rejoin() end })
+    srvGrp:AddToggle("AutoReconnect", { Text = "Auto reconnect", Default = Config.AutoReconnect,
         Callback = function(v) Config.AutoReconnect = v end })
-    T.Server:AddToggle("AntiAFK", { Title = "Anti AFK", Default = Config.AntiAFK,
+    srvGrp:AddToggle("AutoRejoinKick", { Text = "Auto rejoin on kick", Default = Config.AutoRejoinKick,
+        Callback = function(v) Config.AutoRejoinKick = v end })
+    srvGrp:AddToggle("StaffAutoRejoin", { Text = "Rejoin on staff", Default = Config.StaffAutoRejoin,
+        Callback = function(v) Config.StaffAutoRejoin = v end })
+
+    local protGrp = Tabs.Server:AddRightGroupbox("Protection")
+    protGrp:AddToggle("AntiAFK", { Text = "Anti AFK", Default = Config.AntiAFK,
         Callback = function(v) Config.AntiAFK = v
             if v then enableAntiAfk() else disableAntiAfk() end end })
 
-    -- Webhooks
-    T.Webhooks:AddInput("WebhookURL", { Title = "Webhook URL", Default = "",
+    -- ================= Webhooks =================
+    local whGrp = Tabs.Webhooks:AddLeftGroupbox("Config")
+    whGrp:AddInput("WebhookURL", { Text = "Webhook URL", Default = "",
         Placeholder = "https://discord.com/api/webhooks/...", Finished = true,
         Callback = function(v) Config.WebhookURL = v end })
-    T.Webhooks:AddInput("DiscordUserID", { Title = "Discord User ID", Default = "",
+    whGrp:AddInput("DiscordUserID", { Text = "Discord user ID", Default = "",
         Placeholder = "123456789012345678", Finished = true,
         Callback = function(v) Config.DiscordUserID = v end })
-    T.Webhooks:AddButton({ Title = "Test Webhook", Callback = function() Webhooks.test() end })
-    T.Webhooks:AddToggle("NotifyLegendary", { Title = "Legendary Item Pickup",
-        Default = Config.NotifyLegendary, Callback = function(v) Config.NotifyLegendary = v end })
-    T.Webhooks:AddToggle("NotifyItem", { Title = "Item Pickup", Default = Config.NotifyItem,
+    whGrp:AddButton({ Text = "Test webhook", Func = function() Webhooks.test() end })
+
+    local nfGrp = Tabs.Webhooks:AddRightGroupbox("Notify me on")
+    nfGrp:AddToggle("NotifyLegendary", { Text = "Legendary pickup", Default = Config.NotifyLegendary,
+        Callback = function(v) Config.NotifyLegendary = v end })
+    nfGrp:AddToggle("NotifyItem", { Text = "Item pickup", Default = Config.NotifyItem,
         Callback = function(v) Config.NotifyItem = v end })
-    T.Webhooks:AddToggle("NotifyStand", { Title = "Stand Obtained", Default = Config.NotifyStand,
+    nfGrp:AddToggle("NotifyStand", { Text = "Stand obtained", Default = Config.NotifyStand,
         Callback = function(v) Config.NotifyStand = v end })
-    T.Webhooks:AddToggle("NotifyPrestige", { Title = "Prestige", Default = Config.NotifyPrestige,
+    nfGrp:AddToggle("NotifyPrestige", { Text = "Prestige", Default = Config.NotifyPrestige,
         Callback = function(v) Config.NotifyPrestige = v end })
-    T.Webhooks:AddToggle("NotifyStaff", { Title = "Staff Detected", Default = Config.NotifyStaff,
+    nfGrp:AddToggle("NotifyStaff", { Text = "Staff detected", Default = Config.NotifyStaff,
         Callback = function(v) Config.NotifyStaff = v end })
-    T.Webhooks:AddToggle("NotifyKick", { Title = "Kick / Reconnect", Default = Config.NotifyKick,
+    nfGrp:AddToggle("NotifyKick", { Text = "Kick / reconnect", Default = Config.NotifyKick,
         Callback = function(v) Config.NotifyKick = v end })
 
-    -- Settings
-    T.Settings:AddSlider("UITransparency", { Title = "UI Transparency", Default = 15,
-        Min = 0, Max = 100, Rounding = 0,
-        Callback = function(v) Config.UITransparency = v / 100 end })
-    T.Settings:AddSlider("MenuScale", { Title = "Menu Scale", Default = 100,
-        Min = 50, Max = 150, Rounding = 0,
-        Callback = function(v) Config.MenuScale = v / 100 end })
-    T.Settings:AddParagraph({ Title = "Language", Content = "English" })
-    T.Settings:AddToggle("HideUsername", { Title = "Hide Username (Spoilers)",
-        Default = Config.HideUsername, Callback = function(v) Config.HideUsername = v end })
-    T.Settings:AddButton({ Title = "Save Settings",
-        Callback = function() Config.save() notify("Settings saved.") end })
-    T.Settings:AddButton({ Title = "Reset Settings to Default",
-        Callback = function() Config.reset() end })
+    -- ================= Settings =================
+    local setGrp = Tabs.Settings:AddLeftGroupbox("Config")
+    setGrp:AddButton({ Text = "Save settings",
+        Func = function() Config.save() notify("Settings saved.") end })
+    setGrp:AddButton({ Text = "Reset to defaults", Func = function() Config.reset() end })
 
-    if SaveManager and InterfaceManager then
-        SaveManager:SetLibrary(Fluent)
-        InterfaceManager:SetLibrary(Fluent)
+    local menuGrp = Tabs.Settings:AddRightGroupbox("Menu")
+    menuGrp:AddButton({ Text = "Unload", Func = function() Library:Unload() end })
+    menuGrp:AddLabel("Menu bind"):AddKeyPicker("MenuKeybind",
+        { Default = "End", NoUI = true, Text = "Menu keybind" })
+    Library.ToggleKeybind = Options.MenuKeybind
+
+    -- ================= Info =================
+    local infoGrp = Tabs.Info:AddLeftGroupbox("Axion")
+    infoGrp:AddLabel("Axion YBA hub — farm & QoL focused.")
+    infoGrp:AddButton({ Text = "Discord", Func = function() notify(DISCORD_INVITE) end })
+    infoGrp:AddToggle("ShowUserInfo", { Text = "User info", Default = Config.ShowUserInfo,
+        Callback = function(v) Config.ShowUserInfo = v end })
+    infoGrp:AddToggle("ShowPing", { Text = "Show ping", Default = Config.Ping,
+        Callback = function(v) Config.Ping = v startPing() end })
+    infoGrp:AddToggle("AutoExecute", { Text = "Auto execute", Default = Config.AutoExecute,
+        Callback = function(v) Config.AutoExecute = v autoExecute() end })
+
+    if SaveManager and ThemeManager then
+        SaveManager:SetLibrary(Library)
+        ThemeManager:SetLibrary(Library)
         SaveManager:IgnoreThemeSettings()
-        SaveManager:SetIgnoreIndexes({})
-        InterfaceManager:SetFolder("Axion")
+        SaveManager:SetIgnoreIndexes({ "MenuKeybind" })
+        ThemeManager:SetFolder("Axion")
         SaveManager:SetFolder("Axion/yba")
-        InterfaceManager:BuildInterfaceSection(T.Settings)
-        SaveManager:BuildConfigSection(T.Settings)
-    end
-
-    Window:SelectTab(1)
-    Fluent:Notify({ Title = "Axion", Content = "Script loaded.", Duration = 6 })
-    if SaveManager then
-        pcall(function() SaveManager:LoadAutoloadConfig() end)
+        SaveManager:BuildConfigSection(Tabs.Settings)
+        ThemeManager:ApplyToTab(Tabs.Settings)
     end
 end
 
---==========================================================================
--- Axion main
---==========================================================================
 
 local function axionMain()
     Config.load()
@@ -2797,9 +2841,6 @@ return {
     useItemDirect = useItemDirect,
     Pilot = Pilot,
     Block = Block,
-    startBlocking = startBlocking,
-    stopBlocking = stopBlocking,
-    farmNpcWorker = farmNpcWorker,
     refreshPlayerList = refreshPlayerList,
     applyWeather = applyWeather,
     STAND_SKILLS = STAND_SKILLS,

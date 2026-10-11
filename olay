@@ -327,8 +327,6 @@ end
 -- Movement
 --==========================================================================
 
-local moveTween
-
 function zeroRootVelocity(r)
     if not r then return end
     pcall(function()
@@ -337,22 +335,57 @@ function zeroRootVelocity(r)
     end)
 end
 
+local moveTween, moveCancel = nil, false
+local MOVE_DEFAULT_SPEED = 425
+
 function stopMoveTween()
+    moveCancel = true
     if moveTween then pcall(function() moveTween:Cancel() end); moveTween = nil end
 end
 
-local function tweenRootTo(r, dest, speed)
+-- Faithful to the original travel primitive: noclip-state for the trip,
+-- tween at speed (default 425, min 50) with duration clamped to 0.05..3s,
+-- then WAIT for completion (or arrivedFn/cancel) and report arrival.
+-- Returns true when arrived, false when cancelled.
+local function tweenRootTo(r, dest, speed, arrivedFn, state)
     stopMoveTween()
+    moveCancel = false
     local dist = (r.Position - dest.Position).Magnitude
-    local duration = math.max(0.05, dist / (speed or 300))
+    if dist < 1 then zeroRootVelocity(r) return true end
+    state = state or (Farm.running and "farm") or "main"
+    enableNoclip(state)
     if Config.TravelMethod == "Teleport" or (Environment and Environment._YBA_directTP) then
         r.CFrame = dest
         zeroRootVelocity(r)
+        disableNoclip(state)
         return true
     end
-    moveTween = TweenService:Create(r, TweenInfo.new(duration, Enum.EasingStyle.Linear), { CFrame = dest })
-    moveTween:Play()
-    return true
+    local spd = math.max(speed or MOVE_DEFAULT_SPEED, 50)
+    local dur = math.min(3, math.max(0.05, dist / spd))
+    local tween = TweenService:Create(r, TweenInfo.new(dur, Enum.EasingStyle.Linear), { CFrame = dest })
+    moveTween = tween
+    pcall(function() tween:Play() end)
+    while true do
+        local playing = false
+        pcall(function()
+            playing = tween.PlaybackState == Enum.PlaybackState.Playing
+        end)
+        if not playing then break end
+        if moveCancel then break end
+        task.wait()
+        if arrivedFn then
+            local done = false
+            pcall(function() done = arrivedFn() end)
+            if done then moveCancel = true break end
+        end
+    end
+    local cancelled = moveCancel
+    pcall(function() tween:Cancel() end)
+    pcall(function() tween:Destroy() end)
+    if moveTween == tween then moveTween = nil end
+    disableNoclip(state)
+    zeroRootVelocity(r)
+    return not cancelled
 end
 
 function wakeUpPhysicsAndSync()
@@ -366,8 +399,10 @@ function wakeUpPhysicsAndSync()
     zeroRootVelocity(r)
 end
 
--- CFrame | Vector3 | BasePart | character name
-function moveCharacterTo(where, offset)
+-- CFrame | Vector3 | BasePart | character name.
+-- Like the original travel primitive this BLOCKS until arrival (or timeout)
+-- and returns true when arrived, false when cancelled.
+function moveCharacterTo(where, offset, speed, arrivedFn)
     local r = root()
     if not r then return false end
     local dest
@@ -382,7 +417,7 @@ function moveCharacterTo(where, offset)
         dest = CFrame.new(tr.Position) * CFrame.new(offset or Vector3.new())
     end
     if not dest then return false end
-    return tweenRootTo(r, dest, 300)
+    return tweenRootTo(r, dest, speed, arrivedFn)
 end
 
 function getRandomFarmCFrame()
@@ -680,6 +715,7 @@ end
 Farm = {
     running = false, pickupBusy = false, lastPickup = -1e9,
     pickupConn = nil, roamThread = nil, stats = { picked = 0, sold = 0 },
+    target = nil, attempted = {},
 }
 
 local PICKUP_RANGE = 12
@@ -718,17 +754,66 @@ end
 function Farm.handleDrop(object)
     if not Farm.running then return end
     if Farm.pickupBusy or (now() - Farm.lastPickup) < PICKUP_COOLDOWN then return end
-    local prompt = promptFor(object)
-    local part = prompt and visiblePart(object, prompt) or nil
-    if not (prompt and part) then return end
-    local r = root()
-    if not r or (part.Position - r.Position).Magnitude > PICKUP_RANGE then return end
-    Farm.pickupBusy = true
+    if typeof(object) ~= "Instance" then return end
     Farm.lastPickup = now()
-    pcall(activatePrompt, prompt, 0.5, true)
-    Farm.stats.picked = Farm.stats.picked + 1
-    if keepItem(object.Name) then Webhooks.itemPickup(object.Name, 1) end
+    task.spawn(function() pcall(Farm.pursue, object) end)
+end
+
+-- Actively walk to the item and pick it up (instead of waiting for luck).
+function Farm.pursue(object)
+    if Farm.pickupBusy then return false end
+    if typeof(object) ~= "Instance" or not object.Parent then return false end
+    Farm.pickupBusy = true
+    Farm.target = object
+    local ok = false
+    local t0 = now()
+    while Farm.running and Farm.target == object and (now() - t0) < 12 do
+        if not object.Parent then break end -- despawned / collected
+        local prompt = promptFor(object)
+        local part = prompt and visiblePart(object, prompt) or nil
+        local r = root()
+        if not (prompt and part and r) then break end
+        local reach = prompt.MaxActivationDistance
+        if not reach or reach <= 0 then reach = 10 end
+        local d = (part.Position - r.Position).Magnitude
+        if d <= math.max(PICKUP_RANGE, reach - 0.5) then
+            pcall(activatePrompt, prompt, 0.5, true)
+            Farm.stats.picked = Farm.stats.picked + 1
+            if keepItem(object.Name) then Webhooks.itemPickup(object.Name, 1) end
+            ok = true
+            break
+        else
+            moveCharacterTo(part, Vector3.new(0, 0.1, 0))
+            task.wait(0.25)
+        end
+    end
+    if Farm.target == object then Farm.target = nil end
+    Farm.attempted[object] = now()
     Farm.pickupBusy = false
+    Farm.lastPickup = now()
+    return ok
+end
+
+-- Nearest item with a prompt that we have not recently failed on.
+function Farm.nearestLoose(maxDist)
+    local items = getItemSpawns()
+    local r = root()
+    if not (items and r) then return nil end
+    local best, bestD = nil, maxDist or 60
+    for _, object in ipairs(items:GetChildren()) do
+        if typeof(object) == "Instance" and object.Parent then
+            local lastTry = Farm.attempted[object]
+            if not lastTry or (now() - lastTry) > 30 then
+                local prompt = promptFor(object)
+                local part = prompt and visiblePart(object, prompt) or nil
+                if prompt and part then
+                    local d = (part.Position - r.Position).Magnitude
+                    if d < bestD then best, bestD = object, d end
+                end
+            end
+        end
+    end
+    return best
 end
 
 function Farm.enable()
@@ -745,6 +830,7 @@ end
 function Farm.disable()
     Farm.running = false
     Farm.pickupBusy = false
+    Farm.target = nil
     if Farm.pickupConn then Farm.pickupConn:Disconnect(); Farm.pickupConn = nil end
     if Farm.roamThread then pcall(function() task.cancel(Farm.roamThread) end); Farm.roamThread = nil end
     stopMoveTween()
@@ -756,13 +842,32 @@ function Farm.startRoam()
         while Farm.running do
             if Config.FarmTargetNPC ~= "" then
                 moveCharacterTo(Config.FarmTargetNPC, Vector3.new(0, 3, 0))
+                task.wait(2)
             elseif Config.FarmPositionMode == "Static" then
-                -- stay put; the original also supports a fixed anchor
+                task.wait(1)
+            elseif not Farm.target then
+                -- missed-signal sweep: grab a nearby loose item first
+                local loose = Farm.nearestLoose(60)
+                if loose then
+                    task.spawn(function() pcall(Farm.pursue, loose) end)
+                    task.wait(0.5)
+                else
+                    -- travel somewhere on purpose: wait for arrival, don't
+                    -- cancel the tween every half second (that was the
+                    -- "random wandering" bug)
+                    local dest = getRandomFarmCFrame()
+                    moveCharacterTo(dest)
+                    local t0 = now()
+                    while Farm.running and not Farm.target and (now() - t0) < 8 do
+                        local r = root()
+                        if r and (r.Position - dest.Position).Magnitude < 15 then break end
+                        task.wait(0.5)
+                    end
+                end
             else
-                moveCharacterTo(getRandomFarmCFrame())
+                task.wait(0.5)
             end
             wakeUpPhysicsAndSync()
-            task.wait(0.5)
         end
     end)
 end
@@ -963,7 +1068,7 @@ function cleanupItemStick()
     itemStickConns = {}
 end
 
-function sellItem(name, silent)
+function sellItem(name, silent, allMode)
     if not name or name == "" then return false, "No item provided" end
     local norm = normalizeItemName(name)
     if countItem(norm) == 0 then
@@ -999,7 +1104,7 @@ function sellItem(name, silent)
         if not silent then notify("No " .. tostring(norm) .. " found.") end
         return false, "Item not found"
     end
-    local ok, err = sellItemWorker(tool, false)
+    local ok, err = sellItemWorker(tool, allMode and true or false)
     if ok then
         Farm.stats.sold = Farm.stats.sold + 1
         task.wait(0.05)
@@ -1017,7 +1122,7 @@ function sellAll(name)
     if isSellProtected(norm) then
         notify("Cannot sell " .. tostring(norm) .. " (Item is protected)."); return
     end
-    if sellItem(norm, true) then
+    if sellItem(norm, true, true) then
         notify(string.format("Sold all (%d) %s.", num, norm))
     else
         notify("Failed to sell " .. tostring(norm) .. ".")
@@ -1031,7 +1136,7 @@ function sellAllSelected(list)
         local norm = normalizeItemName(name)
         local num = countItem(norm)
         if num > 0 and not isSellProtected(norm) then
-            if sellItem(norm, true) then sold = sold + num end
+            if sellItem(norm, true, true) then sold = sold + num end
             task.wait(0.05)
         end
     end
@@ -1061,7 +1166,7 @@ function checkAndSellMax()
         if countItem(item.Name) >= limit
             and not isSellProtected(item.Name)
             and not isNeverAutoSell(item.Name) then
-            if sellItem(item.Name, true) then sold[item.Name] = countItem(item.Name) end
+            if sellItem(item.Name, true, true) then sold[item.Name] = countItem(item.Name) end
             task.wait(0.05)
         end
     end
@@ -1133,10 +1238,23 @@ function StandFarm.start()
     Config.StandFarm = true
     StandFarm.running = true
     StandFarm.thread = task.spawn(function()
+        -- like the original (sfUseRoka/sfUseArrow): consume Rokakaka/arrows
+        -- until keepCurrent() holds, waiting ~5s after each use for the
+        -- stand to change. Toggling alone never rolls a new stand.
         while StandFarm.running do
-            toggleStand()
+            if StandFarm.keepCurrent() then break end
+            local rolled = false
+            if countItem("Rokakaka") > 0 then
+                rolled = useItemDirect("Rokakaka")
+            elseif countItem("Mysterious Arrow") > 0 then
+                rolled = useItemDirect("Mysterious Arrow")
+            end
+            if not rolled then
+                notify("Stand farm: no Rokakaka/Arrows left.")
+                break
+            end
             StandFarm.arrowsUsed = StandFarm.arrowsUsed + 1
-            task.wait(1)
+            task.wait(5)
             if StandFarm.keepCurrent() then break end
         end
         StandFarm.running = false
@@ -1152,39 +1270,137 @@ function StandFarm.stop()
 end
 
 function StandFarm.skipShiny()
-    notify("Skip current Shiny")
+    -- reroll once instead of keeping: consume one item, do not stop
+    if countItem("Rokakaka") > 0 then useItemDirect("Rokakaka")
+    elseif countItem("Mysterious Arrow") > 0 then useItemDirect("Mysterious Arrow")
+    else notify("Skip Shiny: no Rokakaka/Arrows left.") return end
+    StandFarm.arrowsUsed = StandFarm.arrowsUsed + 1
+    notify("Skipped shiny (rerolled).")
 end
 
--- stand pilot: keep the stand next to a target player
+-- Use a consumable prácticamente like the original (equip + trigger use).
+-- The original eats Rokakaka / uses arrows directly from the inventory.
+function useItemDirect(itemName)
+    local player = LocalPlayer or Players.LocalPlayer
+    if not player then return false end
+    local char = player.Character
+    if not char then return false end
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    local bp = char:FindFirstChild("Backpack")
+    local tool = nil
+    for _, container in ipairs({ bp, char }) do
+        if container then
+            for _, child in ipairs(container:GetChildren()) do
+                if child:IsA("Tool")
+                    and normalizeItemName(child.Name) == normalizeItemName(itemName) then
+                    tool = child
+                    break
+                end
+            end
+            if tool then break end
+        end
+    end
+    if not tool then return false end
+    if tool.Parent ~= char and humanoid then
+        pcall(function() humanoid:EquipTool(tool) end)
+        task.wait(0.25)
+    end
+    pcall(function()
+        if tool.Activate then tool:Activate(tool) end
+    end)
+    local prompt = tool:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if prompt then pcall(activatePrompt, prompt, 0.5, true) end
+    return true
+end
+
+-- stand pilot: move YOUR STAND next to a target player (the stand detaches and
+-- follows; your character stays). Uses the StandMorph parts like the original.
 local Pilot = { running = false, thread = nil }
+
+local function standMorphPart(model)
+    local morph = model and model:FindFirstChild("StandMorph")
+    if not morph then return nil end
+    return morph.PrimaryPart
+        or morph:FindFirstChild("HumanoidRootPart")
+        or morph:FindFirstChild("StandAttach")
+        or morph:FindFirstChildWhichIsA("BasePart")
+end
+
+local function nearestPlayerHrp()
+    local r = root()
+    local best, bestD = nil, Config.InfPilotRange and 1e9 or 300
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            local hrp = player.Character:FindFirstChild("HumanoidRootPart")
+            if hrp and r then
+                local d = (hrp.Position - r.Position).Magnitude
+                if d < bestD then best, bestD = hrp, d end
+            end
+        end
+    end
+    return best
+end
 
 function Pilot.start()
     if Pilot.thread then return end
     Pilot.running = true
     Pilot.thread = task.spawn(function()
         while Pilot.running do
-            local targetName = Config.TargetStandPlayer
-            if targetName ~= "" then
-                local target = Players:FindFirstChild(targetName)
-                local tr = target and target.Character and target.Character:FindFirstChild("HumanoidRootPart")
-                if tr then
-                    local h = humanoid()
-                    if h then h.WalkSpeed = Config.PilotSpeed end
-                    moveCharacterTo(tr, Vector3.new(0, 0, 0))
+            local c = char()
+            local sp = standMorphPart(c)
+            local tr = nil
+            if Config.TargetStandPlayer ~= "" then
+                local target = Players:FindFirstChild(Config.TargetStandPlayer)
+                tr = target and target.Character
+                    and target.Character:FindFirstChild("HumanoidRootPart")
+            elseif Config.TargetPlayer ~= "" then
+                local target = Players:FindFirstChild(Config.TargetPlayer)
+                tr = target and target.Character
+                    and target.Character:FindFirstChild("HumanoidRootPart")
+            elseif Config.TargetAll then
+                tr = nearestPlayerHrp()
+            end
+            if sp and tr then
+                pcall(function()
+                    sp.CFrame = tr.CFrame * CFrame.new(0, 3, 0)
+                    sp.AssemblyLinearVelocity = Vector3.zero
+                    sp.AssemblyAngularVelocity = Vector3.zero
+                end)
+                if Config.SpectateStand then
+                    pcall(function()
+                        local cam = workspace.CurrentCamera
+                        if cam then cam.CameraSubject = sp end
+                    end)
                 end
             end
             task.wait(0.25)
         end
     end)
+    notify("Stand pilot started.")
 end
 
 function Pilot.stop()
     Pilot.running = false
     if Pilot.thread then pcall(function() task.cancel(Pilot.thread) end); Pilot.thread = nil end
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        local h = humanoid()
+        if cam and h then cam.CameraSubject = h end
+    end)
 end
 
 function Pilot.forceCleanup()
+    Pilot.stop()
     stopMoveTween()
+    local c = char()
+    if c then
+        for _, part in ipairs(c:GetDescendants()) do
+            if part:IsA("BasePart") then
+                pcall(function() part.CanCollide = true end)
+            end
+        end
+    end
+    if Config.Noclip then Config.Noclip = false disableNoclip("main") end
     zeroRootVelocity(root())
     notify("Collision restored & Noclip reset.")
 end
@@ -1230,12 +1446,49 @@ end
 
 function Block.step()
     if Config.BlockBot then
-        startBlocking()
+        local r = root()
+        local wantBlock = true
+        -- projectiles priority: hold block while a hostile projectile is near
+        if Config.ProjectilesPriority and r then
+            for _, o in ipairs(workspace:GetDescendants()) do
+                if o:IsA("BasePart") then
+                    local nm = string.lower(o.Name)
+                    if string.find(nm, "projectile", 1, true)
+                        or string.find(nm, "bullet", 1, true)
+                        or string.find(nm, "knife", 1, true)
+                        or string.find(nm, "rod", 1, true) then
+                        local ok, d = pcall(function()
+                            return (o.Position - r.Position).Magnitude
+                        end)
+                        if ok and d and d < 25 then
+                            wantBlock = true
+                            break
+                        end
+                    end
+                end
+            end
+        end
+        -- Beach Boy E/Y assist: holding E or Y forces block on
+        if Config.BlockBeachBoyEY and UserInput then
+            local held = false
+            pcall(function()
+                held = UserInput:IsKeyDown(Enum.KeyCode.E)
+                    or UserInput:IsKeyDown(Enum.KeyCode.Y)
+            end)
+            if held then wantBlock = true end
+        end
+        if wantBlock and not Block.blocked then
+            startBlocking()
+        elseif wantBlock and Config.Reblocking and Block.blocked then
+            -- re-assert block periodically (covers broken guards)
+            if (now() - (Block.lastReblock or 0)) > 1.5 then
+                Block.lastReblock = now()
+                Block.blocked = false
+                startBlocking()
+            end
+        end
     elseif Block.blocked then
         stopBlocking(true)
-    end
-    if Config.Unblocking and Config.Reblocking and Block.blocked then
-        -- re-blocking window handled by the game; nothing extra needed here
     end
 end
 
@@ -1259,12 +1512,100 @@ function applyJump()
 end
 
 function setNoclip(enabled)
-    local c = char()
+    if enabled then enableNoclip("main") else disableNoclip("main") end
+end
+
+-- Noclip state system, like the original (farm/stand/main request independently;
+-- collisions come back only when NO state is active). Stepped enforcement keeps
+-- parts non-collidable even if the game resets them mid-travel.
+local noclipStates, noclipParts, noclipConn, noclipActive = {}, {}, nil, false
+
+function isAnyNoclipActive()
+    for _, v in pairs(noclipStates) do
+        if v == true then return true end
+    end
+    return false
+end
+
+function restoreCharacterCollisions(c)
+    c = c or (char and char())
     if not c then return end
-    for _, part in ipairs(c:GetDescendants()) do
-        if part:IsA("BasePart") then part.CanCollide = not enabled end
+    for _, part in ipairs(noclipParts) do
+        if part.Parent then
+            pcall(function() part.CanCollide = true end)
+        end
+    end
+    noclipParts = {}
+end
+
+local function noclipEnforceOn(c)
+    noclipParts = {}
+    for _, d in ipairs(c:GetDescendants()) do
+        if d:IsA("BasePart") then
+            noclipParts[#noclipParts + 1] = d
+            pcall(function() d.CanCollide = false end)
+        end
+    end
+    pcall(function()
+        if c.DescendantAdded then
+            c.DescendantAdded:Connect(function(d)
+                if d:IsA("BasePart") then
+                    noclipParts[#noclipParts + 1] = d
+                    pcall(function() d.CanCollide = false end)
+                end
+            end)
+        end
+    end)
+    if not noclipConn and RunService.Stepped then
+        pcall(function()
+            noclipConn = RunService.Stepped:Connect(function()
+                if not isAnyNoclipActive() then
+                    if noclipConn then pcall(function() noclipConn:Disconnect() end) end
+                    noclipConn = nil
+                    noclipActive = false
+                    return
+                end
+                for _, part in ipairs(noclipParts) do
+                    if part.Parent and part.CanCollide then
+                        pcall(function() part.CanCollide = false end)
+                    end
+                end
+                local r = root and root()
+                if r then
+                    pcall(function()
+                        r.AssemblyLinearVelocity = Vector3.zero
+                        r.AssemblyAngularVelocity = Vector3.zero
+                    end)
+                end
+            end)
+        end)
+    end
+    noclipActive = true
+end
+
+function enableNoclip(state)
+    if type(state) ~= "string" or state == "" then state = "main" end
+    noclipStates[state] = true
+    local c = char and char()
+    if c and c.Parent then noclipEnforceOn(c) end
+    noclipActive = true
+end
+
+function disableNoclip(state)
+    if state == true or state == "force" then
+        for k in pairs(noclipStates) do noclipStates[k] = false end
+        restoreCharacterCollisions()
+        return
+    end
+    if type(state) ~= "string" or state == "" then state = "main" end
+    noclipStates[state] = false
+    if not isAnyNoclipActive() then
+        restoreCharacterCollisions()
     end
 end
+
+function enableNoclipState(state) enableNoclip(tostring(state or "stand")) end
+function disableNoclipState(state) disableNoclip(tostring(state or "stand")) end
 
 function setFly(enabled)
     if not enabled then
@@ -1302,23 +1643,42 @@ function resetPlayer()
 end
 
 function refreshPlayerList()
-    notify("Refreshing player list...")
+    local n = 0
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then n = n + 1 end
+    end
+    notify("Players in server: " .. n)
+    return n
 end
 
 function rehookPlayers()
+    refreshPlayerList()
     notify("Player hooks refreshed.")
 end
 
 function applyWeather()
     if not Config.WeatherChanger then return end
-    local atmos = Lighting:FindFirstChildOfClass("Atmosphere") or Instance.new("Atmosphere", Lighting)
-    if Config.Weather == "Fog" then
-        Lighting.FogEnd = 100
-    elseif Config.Weather == "Blood Moon" then
-        Lighting.ClockTime = 0
-        Lighting.FogColor = Color3.fromRGB(120, 0, 0)
-    else
-        Lighting.FogEnd = 100000
+    local L = Lighting
+    if not L then return end
+    local w = Config.Weather
+    if w == "Fog" then
+        L.FogEnd = 100
+    elseif w == "Blood Moon" then
+        L.ClockTime = 0
+        L.FogColor = Color3.fromRGB(120, 0, 0)
+    elseif w == "Rain" then
+        L.ClockTime = 12
+        L.FogEnd = 1500
+    elseif w == "Thunderstorm" then
+        L.ClockTime = 0
+        L.FogEnd = 800
+    elseif w == "Snow" then
+        L.ClockTime = 10
+        L.FogColor = Color3.fromRGB(200, 220, 255)
+        L.FogEnd = 2000
+    else -- Clear
+        L.ClockTime = 14
+        L.FogEnd = 100000
     end
 end
 
@@ -1432,7 +1792,6 @@ function autoExecute()
 end
 
 --==========================================================================
-
 --==========================================================================
 -- AXION core upgrades (ported literally from solved GAP protos)
 -- Inserted before the UI section. Requires core globals above it:
@@ -1697,6 +2056,328 @@ function sellItemWorker(toolInstance, sellAll)
     if (not stillHeld) or attempt >= 4 then return true end
     return false
 end
+-- Per-stand hover heights for the NPC worker (u5 in the original). Values are
+-- reconstructed: only the constant 27 appears literally in the dump; everything
+-- else defaults to it. Tune per stand as observed live.
+local STAND_HOVER = {}
+
+local function hoverHeightFor(standName)
+    return STAND_HOVER[standName] or 27
+end
+
+local function enemyNameMatch(name, target)
+    return normalizeItemName(name) == normalizeItemName(target)
+end
+
+local function targetValidModel(model)
+    if typeof(model) ~= "Instance" or not model.Parent then return false end
+    local hrp = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    return hrp ~= nil and hum ~= nil and hum.Health > 0
+end
+
+local function questForEnemy(enemy)
+    for _, q in ipairs(QUEST_NPCS) do
+        if normalizeItemName(q.enemy) == normalizeItemName(enemy) then return q end
+    end
+    return nil
+end
+
+-- Live quest states (the original's u7() table): the active quest with its
+-- current progress, so progress-advance ends the worker like the original.
+local function questTableState()
+    local cur, prog, max = getQuestState()
+    if cur == nil or cur == "" then return {} end
+    return { { name = cur, curProg = prog,
+        isCompleted = (max > 0 and prog >= max) } }
+end
+
+local function questMatch(name, info, target)
+    local q = questForEnemy((info and info.enemy) or target)
+    return q ~= nil and normalizeItemName(name) == normalizeItemName(q.questTitle)
+end
+
+-- Ensure the quest for this enemy is the active one (original's u4("quest")).
+local function questRefreshKind(target)
+    local q = questForEnemy(target)
+    if not q then return end
+    local cur = getQuestState()
+    if normalizeItemName(cur) ~= normalizeItemName(q.questTitle) then
+        pcall(takeQuest, q)
+    end
+end
+
+-- The literal NPC/quest farm worker (proto#576). targetName e.g. "Thug".
+-- Returns true when done (quest advanced/completed, target dead/gone),
+-- false when no target or preconditions fail. Stop via Config.NpcFarm=false
+-- and Config.QuestFarm=false (both gate each loop iteration).
+function farmNpcWorker(targetName)
+    local player = LocalPlayer or Players.LocalPlayer
+    if not player then return false end
+    local char = player.Character
+    if not (char and char.Parent) then return false end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not (hrp and humanoid and humanoid.Health > 0) then return false end
+    local remoteFunc = char:FindFirstChild("RemoteFunction")
+    local remoteEvent = char:FindFirstChild("RemoteEvent")
+    if not (remoteFunc and remoteEvent) then return false end
+
+    local folders = {
+        workspace:FindFirstChild("Living"),
+        workspace:FindFirstChild("Mob_Spawns2"),
+        workspace:FindFirstChild("NPCs"),
+        workspace:FindFirstChild("Entities"),
+        workspace:FindFirstChild("Enemies"),
+        workspace:FindFirstChild("Mobs"),
+        workspace:FindFirstChild("Spawns"),
+        workspace.Map and workspace.Map:FindFirstChild("NPCs"),
+        workspace.Map and workspace.Map:FindFirstChild("Spawns"),
+        workspace,
+    }
+    local function resolvePart(model)
+        return model
+            and (model:FindFirstChild("HumanoidRootPart")
+                or model.PrimaryPart
+                or model:FindFirstChild("Torso")
+                or model:FindFirstChild("UpperTorso")
+                or model:FindFirstChild("Head"))
+    end
+    local target, bestDist = nil, math.huge
+    for _, folder in ipairs(folders) do
+        if folder then
+            for _, child in ipairs(folder:GetChildren()) do
+                if child:IsA("Model")
+                    and not Players:GetPlayerFromCharacter(child)
+                    and enemyNameMatch(child.Name, targetName)
+                    and targetValidModel(child) then
+                    local part = resolvePart(child)
+                    if part then
+                        local dist = (hrp.Position - part.Position).Magnitude
+                        if dist < bestDist then bestDist, target = dist, child end
+                    end
+                end
+            end
+        end
+    end
+    if not target then task.wait(0.2) return false end
+    local targetPart = resolvePart(target)
+    if not targetPart then return false end
+
+    pcall(questRefreshKind, targetName)
+    local stats = player:FindFirstChild("PlayerStats")
+    local noPilotStands = { None = true, ["Beach Boy"] = true, ["Sex Pistols"] = true,
+        Anubis = true, ["Hermit Purple"] = true, ["Mr. President"] = true,
+        ["White Album"] = true, ["Scary Monsters"] = true }
+    local standName = (stats and stats:FindFirstChild("Stand") and stats.Stand.Value) or "None"
+    local pilotFlag = false
+    if standName ~= "None" and not noPilotStands[standName] then pilotFlag = true end
+
+    local function standMorphPart(model)
+        local morph = model and model:FindFirstChild("StandMorph")
+        if not morph then return nil end
+        return morph.PrimaryPart
+            or morph:FindFirstChild("HumanoidRootPart")
+            or morph:FindFirstChild("StandAttach")
+            or morph:FindFirstChildWhichIsA("BasePart")
+    end
+    local function setAlignMoversEnabled(on)
+        local c = player.Character
+        local morph = c and c:FindFirstChild("StandMorph")
+        local attach = morph and morph:FindFirstChild("StandAttach")
+        if attach then
+            local ap = attach:FindFirstChildOfClass("AlignPosition")
+            local ao = attach:FindFirstChildOfClass("AlignOrientation")
+            if ap then ap.Enabled = on end
+            if ao then ao.Enabled = on end
+        end
+    end
+    local lastSummon = 0
+    if pilotFlag then
+        local summoned = char:FindFirstChild("SummonedStand")
+        summoned = summoned and summoned.Value
+        if not summoned then
+            pcall(function() remoteFunc:InvokeServer("ToggleStand", "Toggle") end)
+            lastSummon = tick()
+            task.wait(0.15)
+        end
+    end
+    if pilotFlag then setAlignMoversEnabled(false) end
+
+    local hover = hoverHeightFor(standName)
+    local targetCF = targetPart.CFrame
+    local standPart = standMorphPart(char)
+    local destCF
+    if pilotFlag and standPart then
+        destCF = (targetCF + targetCF.LookVector * -1.1) - Vector3.new(0, 27, 0)
+    else
+        destCF = targetCF * CFrame.new(0, -hover, 0) * CFrame.Angles(math.rad(90), 0, 0)
+    end
+    hrp.CFrame = destCF
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
+
+    local heartbeatConn
+    heartbeatConn = RunService.Heartbeat:Connect(function()
+        local c = player.Character
+        local myHRP = c and c:FindFirstChild("HumanoidRootPart")
+        local tgtPart = resolvePart(target)
+        if not (myHRP and tgtPart and tgtPart.Parent) then return end
+        if not targetValidModel(target) then return end
+        local cam = c:FindFirstChild("FocusCam")
+        if not cam then
+            cam = Instance.new("ObjectValue")
+            cam.Name = "FocusCam"
+            cam.Parent = c
+        end
+        cam.Value = tgtPart
+        local sp = pilotFlag and standMorphPart(c) or nil
+        if sp then
+            setAlignMoversEnabled(false)
+            sp.CFrame = tgtPart.CFrame - tgtPart.CFrame.LookVector * 1.1
+            sp.AssemblyLinearVelocity = Vector3.zero
+            sp.AssemblyAngularVelocity = Vector3.zero
+            myHRP.CFrame = CFrame.new(tgtPart.Position - Vector3.new(0, 27, 0))
+                * CFrame.Angles(math.rad(90), 0, 0)
+        else
+            myHRP.CFrame = CFrame.new(tgtPart.Position - Vector3.new(0, hover, 0))
+                * CFrame.Angles(math.rad(90), 0, 0)
+        end
+        myHRP.AssemblyLinearVelocity = Vector3.zero
+        myHRP.AssemblyAngularVelocity = Vector3.zero
+    end)
+    local done = false
+
+    local questProg = (stats and stats:FindFirstChild("QuestProgress") and stats.QuestProgress.Value) or 0
+    local questName = (stats and stats:FindFirstChild("Quest") and stats.Quest.Value) or ""
+    local matchedProg = 0
+    for _, entry in ipairs(questTableState()) do
+        if questMatch(entry.name, { enemy = targetName }, targetName)
+            or enemyNameMatch(entry.name, targetName) then
+            matchedProg = entry.curProg
+            break
+        end
+    end
+
+    pcall(function()
+        local money = player.PlayerGui.HUD.Main.DropMoney.Money
+        money.ChildAdded:Connect(function(drop)
+            local n = tonumber(string.match(drop.Name, "%d+"))
+            if n then _G.__axionMoneyDropSeen = true end
+        end)
+    end)
+    local function invokeRemote(arg1, arg2)
+        task.spawn(function()
+            pcall(function()
+                if remoteFunc then remoteFunc:InvokeServer(arg1, arg2) end
+            end)
+        end)
+    end
+    local function fireRemote(arg1, arg2)
+        task.spawn(function()
+            pcall(function()
+                if remoteEvent then remoteEvent:FireServer(arg1, arg2) end
+            end)
+        end)
+    end
+
+    local lastMove = 0
+    local deadline = tick() + 25
+    while true do
+            if not (Config.NpcFarm or Config.QuestFarm) then break end
+        if tick() > deadline then break end
+        local h = char:FindFirstChild("Humanoid")
+        if not h or h.Health <= 0 then break end
+        if done then break end
+        if stats then
+            local q = stats:FindFirstChild("Quest")
+            q = q and q.Value
+            if q == questName then
+                local qp = stats:FindFirstChild("QuestProgress")
+                qp = qp and qp.Value
+                if qp and questProg < qp then done = true break end
+            end
+        end
+        for _, entry in ipairs(questTableState()) do
+            if questMatch(entry.name, { enemy = targetName }, targetName)
+                or enemyNameMatch(entry.name, targetName) then
+                if matchedProg < entry.curProg then done = true break
+                elseif not entry.isCompleted then
+                    -- keep scanning other entries
+                else done = true break end
+            end
+        end
+        if done then break end
+        if not targetValidModel(target) then done = true break end
+        do
+            local th = target:FindFirstChildOfClass("Humanoid")
+            local hv = target:FindFirstChild("Health")
+            if th and th.Health <= 0 and th.MaxHealth > 0 then done = true break end
+            if hv and hv:IsA("ValueBase") then
+                local n = tonumber(hv.Value)
+                if n and n <= 0 then done = true break end
+            end
+        end
+        if pilotFlag then
+            local s = char:FindFirstChild("SummonedStand")
+            s = s and s.Value
+            if s ~= true and tick() - lastSummon > 0.35 then
+                lastSummon = tick()
+                pcall(function() remoteFunc:InvokeServer("ToggleStand", "Toggle") end)
+            end
+        end
+        local blocking = game:GetService("CollectionService"):HasTag(target, "Blocking")
+        if blocking then
+            fireRemote("InputBegan", { Input = Enum.KeyCode.R })
+            invokeRemote("Attack", "m2")
+        else
+            if tick() - lastMove > 0.12 and standName ~= "None" then
+                lastMove = tick()
+                local moves = STAND_SKILLS[standName]
+                if moves then
+                    for _, skill in ipairs(moves) do
+                        invokeRemote("SpecialMove", { Skill = skill })
+                    end
+                else
+                    invokeRemote("SpecialMove", { Skill = "Stand Barrage" })
+                    invokeRemote("SpecialMove", { Skill = "Stand Barrage Finisher" })
+                end
+            end
+            for _ = 1, 5 do invokeRemote("Attack", "m1") end
+        end
+        local spec = stats and stats:FindFirstChild("Spec")
+        spec = spec and spec.Value
+        local wantHamon = (spec and spec:lower():find("hamon")) or char:FindFirstChild("Hamon")
+        if wantHamon then
+            local hamon = char:FindFirstChild("Hamon")
+            hamon = hamon and hamon.Value
+            if hamon and hamon < 80 then invokeRemote("ChargeHamon") end
+        end
+        task.wait()
+    end
+
+    if heartbeatConn then heartbeatConn:Disconnect() end
+    pcall(function()
+        local c = player.Character
+        local f = c and c:FindFirstChild("FocusCam")
+        if f then f:Destroy() end
+    end)
+    if pilotFlag then setAlignMoversEnabled(true) end
+    pcall(function()
+        local c = player.Character
+        local myHRP = c and c:FindFirstChild("HumanoidRootPart")
+        if myHRP then
+            local tp = resolvePart(target)
+            local pos = (tp and tp.Position) or (targetPart and targetPart.Position)
+            if pos then myHRP.CFrame = CFrame.new(pos + Vector3.new(0, 3.5, 0))
+            else myHRP.CFrame = myHRP.CFrame + Vector3.new(0, 28, 0) end
+            myHRP.AssemblyLinearVelocity = Vector3.zero
+            myHRP.AssemblyAngularVelocity = Vector3.zero
+        end
+    end)
+    return done
+end
+
 --==========================================================================
 -- AXION interface (Fluent UI library, animated + acrylic)
 -- Loaded pcall-guarded so headless/stub runs keep working without it.
@@ -2108,6 +2789,19 @@ return {
     runQuestFarm = runQuestFarm,
     directNpcFarm = directNpcFarm,
     StandFarm = StandFarm,
+    purchaseItem = purchaseItem,
+    enableNoclip = enableNoclip,
+    disableNoclip = disableNoclip,
+    isAnyNoclipActive = isAnyNoclipActive,
+    restoreCharacterCollisions = restoreCharacterCollisions,
+    useItemDirect = useItemDirect,
+    Pilot = Pilot,
+    Block = Block,
+    startBlocking = startBlocking,
+    stopBlocking = stopBlocking,
+    farmNpcWorker = farmNpcWorker,
+    refreshPlayerList = refreshPlayerList,
+    applyWeather = applyWeather,
     STAND_SKILLS = STAND_SKILLS,
     getStandSkin = getStandSkin,
     isShinySkin = isShinySkin,
